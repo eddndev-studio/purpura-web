@@ -1,0 +1,15 @@
+{
+  // Worker que sirve la pagina publica de Purpura (politica de privacidad + solicitud de
+  // eliminacion de cuenta), requerida por Google Play. Custom Domain: al desplegar, Cloudflare
+  // crea el DNS y el certificado para purpura.eddn.dev automaticamente (la zona eddn.dev ya
+  // vive en esta cuenta). Subdominio de 1 nivel -> cubierto por el SSL universal.
+  "name": "purpura-privacy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-01",
+  "routes": [
+    { "pattern": "purpura.eddn.dev", "custom_domain": true }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
