@@ -1,18 +1,17 @@
-// Worker estatico: sirve la pagina publica de Purpura. La politica de privacidad y el punto de
-// solicitud de eliminacion de cuenta viven en "/" y "/privacy" (la URL que se declara en Google
-// Play Console). Cualquier otra ruta redirige a "/". Sin dependencias ni estado: solo HTML.
+// Worker estatico: sirve la pagina publica de Purpura. Dos cosas viven aqui:
+//   - "/" y "/privacy": politica de privacidad + punto de solicitud de eliminacion de cuenta
+//     (la URL que se declara en Google Play Console).
+//   - "/verify": landing de verificacion de correo (Fase 2). El correo que envia el backend
+//     enlaza a /verify?token=XXX; la pagina muestra un boton y al pulsarlo el Worker hace un
+//     POST server-to-server a la API (api.purpura.eddn.dev) /auth/verify-email/confirm. El POST
+//     desde el servidor evita CORS y, al exigir el clic, evita que un escaner de enlaces de
+//     correo consuma el token de un solo uso con un simple GET.
+// Cualquier otra ruta redirige a "/". Sin estado ni dependencias: solo HTML.
 
 const LAST_UPDATED = "27 de junio de 2026";
+const API_BASE = "https://api.purpura.eddn.dev";
 
-const PAGE = `<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="all">
-<title>Politica de Privacidad - Purpura</title>
-<meta name="description" content="Politica de privacidad de Purpura, organizador de eventos. Incluye como eliminar tu cuenta y todos tus datos.">
-<style>
+const STYLES = `<style>
   :root {
     --bg: #faf7fe;
     --surface: #ffffff;
@@ -72,7 +71,40 @@ const PAGE = `<!DOCTYPE html>
     border-radius: 12px; padding: 16px 18px; margin: 16px 0;
   }
   footer { margin-top: 44px; color: var(--muted); font-size: 13px; }
-</style>
+  /* Verificacion de correo (/verify). */
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 18px;
+    padding: 36px 28px; margin-top: 26px; text-align: center;
+  }
+  .card h1 { margin: 14px 0 8px; }
+  .card p { color: var(--muted); max-width: 46ch; margin-left: auto; margin-right: auto; }
+  .badge {
+    width: 66px; height: 66px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .badge svg { width: 32px; height: 32px; }
+  .badge.ok { background: rgba(124, 77, 255, .14); color: var(--brand-bright); }
+  .badge.warn { background: rgba(214, 158, 0, .18); color: #b07c00; }
+  .badge.err { background: rgba(214, 60, 60, .14); color: #d23c3c; }
+  .btn {
+    display: inline-block; margin-top: 20px; padding: 13px 28px;
+    border: none; border-radius: 999px; cursor: pointer;
+    background: linear-gradient(135deg, var(--brand), var(--brand-bright));
+    color: #fff; font: inherit; font-weight: 700;
+  }
+  .btn:hover { filter: brightness(1.06); }
+  .muted-small { color: var(--muted); font-size: 14px; margin-top: 16px; }
+</style>`;
+
+const PAGE = `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="all">
+<title>Politica de Privacidad - Purpura</title>
+<meta name="description" content="Politica de privacidad de Purpura, organizador de eventos. Incluye como eliminar tu cuenta y todos tus datos.">
+${STYLES}
 </head>
 <body>
 <div class="wrap">
@@ -151,20 +183,155 @@ const PAGE = `<!DOCTYPE html>
 </body>
 </html>`;
 
+const ICON_MAIL = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 7l9 6 9-6"></path></svg>`;
+const ICON_CHECK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"></path></svg>`;
+const ICON_WARN = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7v6"></path><circle cx="12" cy="16.6" r="1.1" fill="currentColor" stroke="none"></circle></svg>`;
+
+// Cada estado de /verify: que badge, icono, titulo, mensaje y si ofrece un boton (que reenvia
+// el token por POST). prompt/error ofrecen boton (confirmar/reintentar); el resto son terminales.
+const VERIFY_STATES = {
+  prompt: {
+    title: "Verifica tu correo", badge: "ok", icon: ICON_MAIL, heading: "Verifica tu correo",
+    body: "Confirma que este correo es tuyo para terminar de configurar tu cuenta de Purpura.",
+    button: "Confirmar mi correo",
+  },
+  success: {
+    title: "Correo verificado", badge: "ok", icon: ICON_CHECK, heading: "Correo verificado",
+    body: "Listo. Tu correo quedo verificado. Ya puedes cerrar esta ventana y volver a la app.",
+  },
+  expired: {
+    title: "El enlace expiro", badge: "warn", icon: ICON_WARN, heading: "El enlace expiro",
+    body: "Este enlace de verificacion ya no es valido. Abre Purpura y pide un nuevo correo de verificacion.",
+  },
+  invalid: {
+    title: "Enlace no valido", badge: "err", icon: ICON_WARN, heading: "Enlace no valido",
+    body: "Este enlace ya se uso o no es correcto. Si tu correo aun no esta verificado, pide uno nuevo desde la app.",
+  },
+  error: {
+    title: "Algo salio mal", badge: "err", icon: ICON_WARN, heading: "Algo salio mal",
+    body: "No pudimos verificar tu correo en este momento. Intentalo de nuevo en unos minutos.",
+    button: "Reintentar",
+  },
+  missing: {
+    title: "Enlace incompleto", badge: "warn", icon: ICON_WARN, heading: "Enlace incompleto",
+    body: "Falta el token de verificacion. Abre el enlace directamente desde el correo que te enviamos.",
+  },
+};
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function verifyPage(stateKey, token) {
+  const s = VERIFY_STATES[stateKey] || VERIFY_STATES.error;
+  const action = s.button
+    ? `
+    <form method="post" action="/verify">
+      <input type="hidden" name="token" value="${escapeHtml(token)}">
+      <button class="btn" type="submit">${s.button}</button>
+    </form>`
+    : `
+    <p class="muted-small">Puedes cerrar esta ventana.</p>`;
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${s.title} - Purpura</title>
+${STYLES}
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="brand"><span class="dot"></span>Purpura</span>
+  </header>
+  <div class="card">
+    <span class="badge ${s.badge}">${s.icon}</span>
+    <h1>${s.heading}</h1>
+    <p>${s.body}</p>${action}
+  </div>
+  <footer>&copy; 2026 Purpura - eddndev</footer>
+</div>
+</body>
+</html>`;
+}
+
+function htmlResponse(html, maxAge) {
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": `public, max-age=${maxAge}`,
+    },
+  });
+}
+
+// Las paginas de /verify dependen del token y de la respuesta de la API: nunca se cachean.
+function verifyResponse(html) {
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+// POST /verify: el token llega en el cuerpo del formulario. El Worker confirma contra la API
+// (server-to-server, sin CORS) y traduce el codigo HTTP a un estado de pagina.
+async function confirmVerification(request) {
+  let token = "";
+  try {
+    const form = await request.formData();
+    token = (form.get("token") || "").toString();
+  } catch (_) {
+    // cuerpo ilegible -> se trata como token ausente
+  }
+  if (!token) {
+    return verifyResponse(verifyPage("missing", ""));
+  }
+
+  let status = 0;
+  try {
+    const resp = await fetch(`${API_BASE}/api/v1/auth/verify-email/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    status = resp.status;
+  } catch (_) {
+    return verifyResponse(verifyPage("error", token));
+  }
+
+  let state;
+  if (status === 204) state = "success";
+  else if (status === 410) state = "expired";
+  else if (status === 400) state = "invalid";
+  else state = "error";
+  return verifyResponse(verifyPage(state, token));
+}
+
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    const { pathname } = url;
 
-    if (url.pathname === "/" || url.pathname === "/privacy" || url.pathname === "/privacidad") {
-      return new Response(PAGE, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "public, max-age=3600",
-        },
-      });
+    if (pathname === "/" || pathname === "/privacy" || pathname === "/privacidad") {
+      return htmlResponse(PAGE, 3600);
     }
 
-    // Cualquier otra ruta lleva a la politica (unica pagina del sitio).
+    if (pathname === "/verify") {
+      if (request.method === "POST") {
+        return confirmVerification(request);
+      }
+      // GET: muestra el boton de confirmacion (o el aviso si falta el token).
+      const token = url.searchParams.get("token") || "";
+      return verifyResponse(verifyPage(token ? "prompt" : "missing", token));
+    }
+
+    // Cualquier otra ruta lleva a la politica.
     return Response.redirect(url.origin + "/", 302);
   },
 };
